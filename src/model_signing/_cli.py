@@ -21,16 +21,22 @@ import sys
 from typing import Optional
 
 import click
-from opentelemetry import trace
-from opentelemetry.instrumentation import auto_instrumentation
 
 import model_signing
 
+class NoOpTracer:
+    def start_as_current_span(self, name):
+        import contextlib
+        @contextlib.contextmanager
+        def noop_context():
+            class NoOpSpan:
+                def set_attribute(self, key, value):
+                    pass
+            yield NoOpSpan()
+        return noop_context()
 
-auto_instrumentation.initialize()
-tracer = trace.get_tracer(__name__)
-
-logging.basicConfig(format="%(message)s", level=logging.INFO)
+# Global tracer variable, we will initialized this within the main() function
+tracer = None
 
 
 # Decorator for the commonly used argument for the model path.
@@ -183,11 +189,34 @@ class _PKICmdGroup(click.Group):
     ),
 )
 @click.version_option(model_signing.__version__, "--version")
-def main() -> None:
+@click.option(
+    "--log-level",
+    type=click.Choice(['DEBUG', 'INFO', 'WARNING', 'ERROR', 'CRITICAL'], case_sensitive=False),
+    default='INFO',
+    show_default=True,
+    help="Set the logging level. This can also be set via the MODEL_SIGNING_LOG_LEVEL env var.",
+)
+def main(log_level: str) -> None:
     """ML model signing and verification.
 
     Use each subcommand's `--help` option for details on each mode.
     """
+    global tracer
+
+    logging.basicConfig(format="%(message)s", level=getattr(logging, log_level.upper()))
+
+    try:
+        from opentelemetry import trace
+        from opentelemetry.instrumentation import auto_instrumentation
+
+        auto_instrumentation.initialize()
+        tracer = trace.get_tracer(__name__)
+    except ImportError:
+        logging.info("OpenTelemetry not installed. Tracing is disabled.")
+        tracer = NoOpTracer()
+    except Exception as e:
+        logging.error(f"Failed to initialize OpenTelemetry auto instrumentation: {e}")
+        sys.exit(1)
 
 
 @main.group(name="sign", subcommand_metavar="PKI_METHOD", cls=_PKICmdGroup)
